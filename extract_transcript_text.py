@@ -125,6 +125,10 @@ def extract(project_dir: Path, out_dir: Path, state_path: Path = DEFAULT_STATE, 
             size += len(entry)
         flush()
         files[key] = {"messages": len(messages), "next_part": part_no}
+        # persist state per transcript, not once at the end — a crash mid-run must
+        # not leave emitted parts unrecorded (the next run would re-emit them)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"{session}: {len(messages)-done} new message(s), {written/1e3:.0f} KB")
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")

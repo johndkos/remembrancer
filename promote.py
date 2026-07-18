@@ -1,9 +1,9 @@
 """Prepare and apply externally judged memory promotions."""
 from __future__ import annotations
-import argparse, html, json, re
+import argparse, json, os, re
 from dataclasses import dataclass
 from pathlib import Path
-from verify_evidence import MIN_SEGMENT, norm
+from verify_evidence import build_corpus, evidence_ok
 
 RULINGS = {"NEW", "DUPLICATE", "SUPERSEDED", "DISCARD", "CONFLICT"}
 FIELDS = {"atom", "ruling", "memory_file", "atom_quote", "memory_quote", "note"}
@@ -21,23 +21,6 @@ def load(path):
     body = parts[2].strip() if len(parts) > 2 else text
     return Atom(path, field(text, "name") or path.stem, field(text, "description"), field(text, "type"), field(text, "source_session") or field(text, "originSessionId"), field(text, "source_ts"), body, text)
 
-def evidence_ok(atom, extracts):
-    m = re.search(r"\*\*Evidence:\*\*\s*(.+?)(?:\n\*\*|\n---|\Z)", atom.text, re.S)
-    if not m: return False
-    corpus = norm(html.unescape(" ".join(p.read_text(encoding="utf-8", errors="replace") for p in extracts.rglob("*.txt"))))
-    evidence = html.unescape(m.group(1))
-    # Evidence may be several quoted spans joined by prose ("..." and "...").
-    # Spans are delimited by UNESCAPED quotes; a \" inside a span is a literal
-    # quote belonging to the quoted text, not a span boundary.
-    spans = [s.replace(r'\"', '"').replace(r'\n', ' ')
-             for s in re.findall(r'"((?:[^"\\]|\\.)*)"', evidence)]
-    if not spans:
-        spans = [evidence.replace(r'\"', '"').replace(r'\n', ' ').strip().strip('"')]
-    segs = [s for span in spans for s in re.split(r"\.\.\.|…|â€¦", span) if len(norm(s)) >= MIN_SEGMENT]
-    # ANY sufficiently-long segment matching grounds the atom — quotes that cross
-    # the extractor's truncation boundary would fail a longest-segment-only rule.
-    return any(norm(s) in corpus for s in segs) if segs else norm(m.group(1)) in corpus
-
 def house(atom):
     return f"---\nname: {atom.name}\ndescription: \"{atom.description.replace(chr(34), chr(39))}\"\nmetadata:\n  node_type: memory\n  type: {atom.kind}\n  originSessionId: {atom.session}\n---\n\n{atom.body}\n"
 
@@ -51,7 +34,10 @@ def append_index(path, atom):
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     text = text.rstrip("\r\n")
     line = index_line(atom)
-    path.write_text(f"{text}\n{line}\n" if text else f"{line}\n", encoding="utf-8")
+    # write via tempfile + os.replace so a crash can never truncate the index
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(f"{text}\n{line}\n" if text else f"{line}\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 def read_judgments(path, atoms, evidence):
     judged = {}
@@ -87,7 +73,8 @@ def run(staging, target, apply=False, extracts=None, report=None, judgments=None
     if not extracts.is_dir() or not any(extracts.rglob("*.txt")): raise ValueError(f"extracts path contains no .txt files: {extracts}")
     paths = sorted(staging.rglob("*.md")); atoms = {atom.name: atom for atom in map(load, paths)}
     if len(atoms) != len(paths): raise ValueError("staged atom slugs must be unique")
-    evidence = {slug: evidence_ok(atom, extracts) for slug, atom in atoms.items()}
+    corpus = build_corpus(extracts)
+    evidence = {slug: evidence_ok(atom.text, corpus) for slug, atom in atoms.items()}
     if apply:
         if judgments is None: raise ValueError("--apply requires --judgments from the external judgment stage; there is no bypass")
         ruled = read_judgments(judgments, atoms, evidence)
