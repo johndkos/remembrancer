@@ -1,0 +1,10 @@
+# Transcript-derived data — personal; never commit
+extracts/
+state/
+staging/
+runs/
+
+# Python
+__pycache__/
+*.pyc
+tests/work/
