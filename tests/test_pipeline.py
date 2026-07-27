@@ -87,6 +87,20 @@ def test_apply_with_judgments_writes_only_new_and_indexes_once(tmp_path):
     assert b"\xc3\xa2\xe2\x82\xac\xe2\x80\x9d" not in (target / "MEMORY.md").read_bytes()
     assert (target / "rolling-window.md").read_text().count("Same rolling fact") == 1
 
+def test_index_hook_never_truncates_mid_word(tmp_path):
+    from promote import INDEX_LINE_MAX, index_line, load
+    long_desc = "the exporter appends new rows without reformatting existing ones " * 6
+    path = tmp_path / "long.md"
+    atom(path, "verbose-atom", long_desc, "Body")
+    line = index_line(load(path))
+    assert len(line) <= INDEX_LINE_MAX + 1                  # +1 for the ellipsis
+    assert line.endswith("…"), "a shortened hook must be marked as elided"
+    assert not line.rstrip("…").endswith(" "), "no dangling space before the ellipsis"
+    assert line.rstrip("…").split()[-1] in long_desc.split(), "last word must be whole"
+    short = tmp_path / "short.md"
+    atom(short, "terse-atom", "a short durable fact", "Body")
+    assert index_line(load(short)).endswith("a short durable fact")  # untouched, no ellipsis
+
 def test_judgment_validation_aborts_without_writes(tmp_path):
     staging, target, extracts = setup_case(tmp_path, unverified=True)
     cases = [json.dumps(judgment("unique-frobnicator", "NEW")) + "\n", "{bad json\n", "\n".join(json.dumps(x) for x in [judgment("unique-frobnicator", "NEW"), judgment("rolling-window", "NEW")]) + "\n"]

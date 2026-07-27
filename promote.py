@@ -24,11 +24,19 @@ def load(path):
 def house(atom):
     return f"---\nname: {atom.name}\ndescription: \"{atom.description.replace(chr(34), chr(39))}\"\nmetadata:\n  node_type: memory\n  type: {atom.kind}\n  originSessionId: {atom.session}\n---\n\n{atom.body}\n"
 
+INDEX_LINE_MAX = 320  # the index loads into context every session — keep hooks bounded
+
 def index_line(atom):
     title = atom.name.replace("-", " ")
     title = title[:1].upper() + title[1:]
     prefix = f"- [{title}]({atom.name}.md) — "
-    return prefix + atom.description[:max(0, 200 - len(prefix))]
+    budget = max(0, INDEX_LINE_MAX - len(prefix))
+    desc = " ".join(atom.description.split())
+    if len(desc) <= budget:
+        return prefix + desc
+    # cut on a word boundary and mark the elision — never strand a hook mid-word
+    cut = desc[:budget].rsplit(" ", 1)[0].rstrip(" ,;:.—-")
+    return prefix + (cut or desc[:budget]) + "…"
 
 def append_index(path, atom):
     text = path.read_text(encoding="utf-8") if path.exists() else ""
