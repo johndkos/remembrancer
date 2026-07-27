@@ -1,4 +1,4 @@
-import json, shutil, subprocess, sys
+import json, os, shutil, subprocess, sys
 from pathlib import Path
 import pytest
 
@@ -133,6 +133,84 @@ def test_omitted_extracts_is_actionable_without_writes(tmp_path):
     result = subprocess.run([sys.executable, str(SCRIPT), str(staging), str(target)], text=True, capture_output=True)
     assert result.returncode != 0 and "--extracts" in result.stderr and "required" in result.stderr
     assert snapshot(target) == before
+
+def age(path, seconds):
+    """Move a file's mtime by `seconds` (negative = older). Timestamps are the guard's whole
+    input, so tests set them explicitly rather than relying on write order."""
+    stat = path.stat(); os.utime(path, (stat.st_atime, stat.st_mtime + seconds))
+
+def staleness_case(tmp_path, ruling="NEW"):
+    staging, target, extracts = setup_case(tmp_path)
+    judgments = tmp_path / "judgments.jsonl"
+    judgments.write_text("\n".join(json.dumps(x) for x in [judgment("unique-frobnicator", ruling), judgment("rolling-window", "DUPLICATE")]) + "\n", encoding="utf-8")
+    for path in target.glob("*.md"): age(path, -3600)   # corpus predates judging
+    return staging, target, extracts, judgments
+
+def test_stale_corpus_blocks_apply_without_writes(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    age(target / "rolling-window.md", 7200)             # corpus edited after judging
+    before = snapshot(target)
+    with pytest.raises(ValueError) as exc:
+        run(staging, target, True, extracts, tmp_path / "apply.md", judgments)
+    assert "stale" in str(exc.value)
+    assert snapshot(target) == before and not (target / "unique-frobnicator.md").exists()
+
+def test_stale_error_names_offending_files(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    age(target / "rolling-window.md", 7200)
+    result = subprocess.run([sys.executable, str(SCRIPT), str(staging), str(target), "--extracts", str(extracts), "--apply", "--judgments", str(judgments)], text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "rolling-window.md" in result.stderr and "Re-judge" in result.stderr
+    assert result.stderr.count(":") >= 2, "both the cutoff and the file time must be shown"
+
+def test_fresh_corpus_applies_normally(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    run(staging, target, True, extracts, tmp_path / "apply.md", judgments)
+    assert (target / "unique-frobnicator.md").exists()
+    assert "- [Unique frobnicator]" in (target / "MEMORY.md").read_text(encoding="utf-8")
+
+def test_memory_index_mtime_does_not_trigger_staleness(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    run(staging, target, True, extracts, tmp_path / "apply.md", judgments)
+    # MEMORY.md and the atom we just wrote are both newer than the judgments now; neither is drift
+    run(staging, target, True, extracts, tmp_path / "apply2.md", judgments)
+    assert (target / "MEMORY.md").read_text(encoding="utf-8").count("- [Unique frobnicator]") == 1
+
+def test_edited_own_output_is_treated_as_corpus_drift(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    run(staging, target, True, extracts, tmp_path / "apply.md", judgments)
+    written = target / "unique-frobnicator.md"
+    written.write_text(written.read_text(encoding="utf-8") + "\nLater correction.\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        run(staging, target, True, extracts, tmp_path / "apply2.md", judgments)
+    assert "unique-frobnicator.md" in str(exc.value)
+
+def test_corpus_also_file_triggers_staleness(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    rules = tmp_path / "STANDING_RULES.md"; rules.write_text("# standing rules\n", encoding="utf-8")
+    before = snapshot(target)
+    with pytest.raises(ValueError) as exc:
+        run(staging, target, True, extracts, tmp_path / "apply.md", judgments, corpus_also=[rules])
+    assert "STANDING_RULES.md" in str(exc.value) and snapshot(target) == before
+
+def test_archive_subfolder_never_triggers_staleness(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    archive = target / "_archive"; archive.mkdir()
+    (archive / "audit-2026-01-01.md").write_text("audit report\n", encoding="utf-8")
+    run(staging, target, True, extracts, tmp_path / "apply.md", judgments)
+    assert (target / "unique-frobnicator.md").exists()
+
+def test_chunk_dir_earliest_mtime_is_judged_at(tmp_path):
+    staging, target, extracts, judgments = staleness_case(tmp_path)
+    chunks = tmp_path / "judgments"; chunks.mkdir()
+    (chunks / "chunk01.judgments.jsonl").write_text("", encoding="utf-8")
+    (chunks / "chunk02.judgments.jsonl").write_text("", encoding="utf-8")
+    age(chunks / "chunk01.judgments.jsonl", -1800)      # first chunk judged before the merge
+    age(target / "rolling-window.md", 2700)             # newer than chunk01, older than the merged file
+    before = snapshot(target)
+    with pytest.raises(ValueError) as exc:
+        run(staging, target, True, extracts, tmp_path / "apply.md", judgments)
+    assert "rolling-window.md" in str(exc.value) and snapshot(target) == before
 
 def test_discard_is_accepted_reported_and_never_written(tmp_path):
     staging, target, extracts = setup_case(tmp_path); judgments = tmp_path / "judgments.jsonl"

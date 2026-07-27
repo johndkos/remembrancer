@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse, json, os, re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from verify_evidence import build_corpus, evidence_ok
 
@@ -75,7 +76,35 @@ def read_judgments(path, atoms, evidence):
     if missing: raise ValueError(f"missing judgment for atom(s): {', '.join(missing)}")
     return judged
 
-def run(staging, target, apply=False, extracts=None, report=None, judgments=None, queue=None):
+def stamp(mtime):
+    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+def judged_at(judgments):
+    """When the rulings were formed. Prefer the EARLIEST per-chunk judge output: a chunked
+    run forms rulings across a window, and the merged file is written after every read."""
+    chunks = judgments.with_name(judgments.stem)
+    if chunks.is_dir():
+        times = [path.stat().st_mtime for path in chunks.glob("*.jsonl")]
+        if times: return min(times)
+    return judgments.stat().st_mtime
+
+def moved_corpus(target, atoms, judgments, corpus_also):
+    """Corpus files changed after judging. Rulings are only valid against the corpus as of
+    judging time, so anything newer means the judges ruled against text that no longer exists."""
+    cutoff = judged_at(judgments); moved = []
+    for path in sorted(target.glob("*.md")):  # non-recursive: _archive is out of scope by contract
+        if path.name == "MEMORY.md": continue  # we rewrite it ourselves; derived index, not a source of facts
+        atom = atoms.get(path.stem)
+        # our own prior output is not corpus drift — but only when identical to what we would
+        # write now; an edited copy is a real corpus change even if the slug matches. Compare as
+        # text: read_text normalizes the CRLF that write_text produces on Windows.
+        if atom is not None and path.read_text(encoding="utf-8") == house(atom): continue
+        if path.stat().st_mtime > cutoff: moved.append(path)
+    for path in corpus_also or []:
+        if path.exists() and path.stat().st_mtime > cutoff: moved.append(path)
+    return cutoff, moved
+
+def run(staging, target, apply=False, extracts=None, report=None, judgments=None, queue=None, corpus_also=None):
     if extracts is None: raise ValueError("--extracts is required; provide a directory containing transcript extract .txt files")
     if not extracts.exists(): raise ValueError(f"extracts path does not exist: {extracts}")
     if not extracts.is_dir() or not any(extracts.rglob("*.txt")): raise ValueError(f"extracts path contains no .txt files: {extracts}")
@@ -86,6 +115,13 @@ def run(staging, target, apply=False, extracts=None, report=None, judgments=None
     if apply:
         if judgments is None: raise ValueError("--apply requires --judgments from the external judgment stage; there is no bypass")
         ruled = read_judgments(judgments, atoms, evidence)
+        cutoff, moved = moved_corpus(target, atoms, judgments, corpus_also)
+        if moved:
+            detail = "\n".join(f"  {path.name}  {stamp(path.stat().st_mtime)}" for path in moved)
+            raise ValueError(
+                f"judgments are stale: {len(moved)} corpus file(s) changed after judging ({stamp(cutoff)})\n{detail}\n"
+                "Rulings are only valid against the corpus as of judging time. Re-judge this\n"
+                "project against the current corpus, then apply the new judgments.")
         rows = [(atom, ruled[slug]["ruling"], evidence[slug], ruled[slug]["note"], "write" if ruled[slug]["ruling"] == "NEW" else "review") for slug, atom in atoms.items()]
         for atom, ruling, _, _, _ in rows:
             if ruling == "NEW" and not (target / f"{atom.name}.md").exists():
@@ -106,9 +142,9 @@ def run(staging, target, apply=False, extracts=None, report=None, judgments=None
     return rows
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(); parser.add_argument("staging_dir", type=Path); parser.add_argument("target_memory_dir", type=Path); parser.add_argument("--apply", action="store_true"); parser.add_argument("--judgments", type=Path); parser.add_argument("--extracts", type=Path, required=True, help="directory containing transcript extract .txt files"); parser.add_argument("--report", type=Path); parser.add_argument("--queue", type=Path); args = parser.parse_args(argv)
+    parser = argparse.ArgumentParser(); parser.add_argument("staging_dir", type=Path); parser.add_argument("target_memory_dir", type=Path); parser.add_argument("--apply", action="store_true"); parser.add_argument("--judgments", type=Path); parser.add_argument("--extracts", type=Path, required=True, help="directory containing transcript extract .txt files"); parser.add_argument("--report", type=Path); parser.add_argument("--queue", type=Path); parser.add_argument("--corpus-also", type=Path, action="append", help="additional file the judges were required to read (e.g. the global standing-rules CLAUDE.md); repeatable"); args = parser.parse_args(argv)
     if args.apply and args.judgments is None: parser.error("--apply requires --judgments from the external judgment stage; there is no bypass")
-    try: run(args.staging_dir, args.target_memory_dir, args.apply, args.extracts, args.report, args.judgments, args.queue)
+    try: run(args.staging_dir, args.target_memory_dir, args.apply, args.extracts, args.report, args.judgments, args.queue, args.corpus_also)
     except ValueError as exc: parser.error(str(exc))
 
 if __name__ == "__main__": main()
