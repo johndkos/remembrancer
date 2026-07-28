@@ -24,9 +24,15 @@ def norm(s: str) -> str:
 
 
 def build_corpus(extracts_dir: Path) -> str:
-    return norm(html.unescape(" ".join(
-        p.read_text(encoding="utf-8", errors="replace")
-        for p in extracts_dir.rglob("*.txt"))))
+    entries = []
+    for path in extracts_dir.rglob("*.txt"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for entry in re.split(r"\n\s*\n", text):
+            first = entry.splitlines()[0] if entry.splitlines() else ""
+            if re.match(r"^\[[^\]]+\]\s+.*SESSION SUMMARY.*:", first):
+                continue
+            entries.append(entry)
+    return norm(html.unescape(" ".join(entries)))
 
 
 def evidence_ok(atom_text: str, corpus: str) -> bool:
@@ -41,10 +47,14 @@ def evidence_ok(atom_text: str, corpus: str) -> bool:
              for s in re.findall(r'"((?:[^"\\]|\\.)*)"', evidence)]
     if not spans:
         spans = [evidence.replace(r'\"', '"').replace(r'\n', ' ').strip().strip('"')]
-    segs = [s for span in spans for s in re.split(r"\.\.\.|…|â€¦", span) if len(norm(s)) >= MIN_SEGMENT]
-    # ANY sufficiently-long segment matching grounds the atom — quotes that cross
-    # the extractor's truncation boundary would fail a longest-segment-only rule.
-    return any(norm(s) in corpus for s in segs) if segs else norm(m.group(1)) in corpus
+    qualified = []
+    for span in spans:
+        segs = [s for s in re.split(r"\.\.\.|…|â€¦", span) if len(norm(s)) >= MIN_SEGMENT]
+        if segs:
+            qualified.append(segs)
+    # Every qualifying span must be grounded; any segment within that span may
+    # match so quotes crossing an extractor truncation boundary still verify.
+    return all(any(norm(s) in corpus for s in segs) for segs in qualified) if qualified else norm(m.group(1)) in corpus
 
 
 def main(atoms_dir: Path, extracts_dir: Path) -> None:

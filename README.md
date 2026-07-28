@@ -78,8 +78,16 @@ python judgment_tools.py merge reports/judgments reports/queue.jsonl \
 
 # 5. review reports/review.md yourself, then — and only then — apply:
 python promote.py staging/<project> <memory-dir> --apply \
-    --judgments reports/judgments.jsonl --extracts extracts
+    --judgments reports/judgments.jsonl --extracts extracts \n    --queue reports/queue.jsonl
 ```
+
+`--apply` requires the queue: the dry run writes a `<queue>.manifest.json`
+sidecar hashing every staged atom and every corpus file, and apply refuses
+if ANY content changed since judging — an edited atom, a modified or deleted
+memory file, a sync clobber. Judgments are bound to exactly what was judged;
+timestamps are never the authority. Set `REMEMBRANCER_GLOBAL_MD` to your
+global instructions file (e.g. CLAUDE.md) so the manifest covers it too —
+the judgment contract has judges read it.
 
 Keep reports OUT of the staging directory — every `.md` under staging is
 treated as a staged atom.

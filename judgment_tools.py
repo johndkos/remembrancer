@@ -31,6 +31,12 @@ def split(queue: Path, chunks_dir: Path, size: int) -> None:
 
 def merge(judgments_dir: Path, queue: Path, out: Path, review: Path | None) -> int:
     merged, bad = [], []
+    try:
+        queue_atoms = [json.loads(l)["atom"] for l in queue.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        print(f"invalid queue: {exc}")
+        return 1
+    queue_set = set(queue_atoms)
     for f in sorted(judgments_dir.glob("chunk*.judgments.jsonl")):
         for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             line = line.strip()
@@ -39,27 +45,29 @@ def merge(judgments_dir: Path, queue: Path, out: Path, review: Path | None) -> i
             try:
                 o = json.loads(line)
                 assert isinstance(o.get("atom"), str) and o["atom"], "missing atom"
+                assert o["atom"] in queue_set, f"unknown atom {o['atom']!r}"
                 assert o.get("ruling") in RULINGS, f"bad ruling {o.get('ruling')!r}"
                 # judges sometimes omit memory keys on NEW/DISCARD; absent means null
                 o.setdefault("memory_file", None)
                 o.setdefault("memory_quote", None)
-                o.setdefault("atom_quote", "")
-                o.setdefault("note", "")
+                assert isinstance(o.get("atom_quote"), str) and o["atom_quote"].strip(), "missing or empty atom_quote"
+                assert isinstance(o.get("note"), str) and o["note"].strip(), "missing or empty note"
                 merged.append(o)
             except (AssertionError, json.JSONDecodeError) as e:
                 bad.append(f"{f.name}:{i}: {e}")
 
-    queue_atoms = [json.loads(l)["atom"]
-                   for l in queue.read_text(encoding="utf-8").splitlines() if l.strip()]
     judged = Counter(o["atom"] for o in merged)
     missing = [a for a in queue_atoms if a not in judged]
     dupes = [a for a, n in judged.items() if n > 1]
 
-    out.write_text("\n".join(json.dumps(o) for o in merged) + "\n", encoding="utf-8")
     counts = Counter(o["ruling"] for o in merged)
     print(f"merged: {len(merged)} rulings | {dict(counts)}")
     print(f"malformed: {bad or 'none'} | missing: {missing or 'none'} | multiple rulings: {dupes or 'none'}")
 
+    if bad or missing or dupes:
+        return 1
+
+    out.write_text("\n".join(json.dumps(o) for o in merged) + "\n", encoding="utf-8")
     if review is not None:
         lines = []
         for o in merged:
@@ -71,7 +79,7 @@ def merge(judgments_dir: Path, queue: Path, out: Path, review: Path | None) -> i
         review.write_text("\n".join(lines), encoding="utf-8")
         print(f"review file: {review} ({sum(1 for o in merged if o['ruling'] in ('NEW', 'CONFLICT'))} entries)")
 
-    return 1 if (bad or missing or dupes) else 0
+    return 0
 
 
 def main() -> int:

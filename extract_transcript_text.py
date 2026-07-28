@@ -14,13 +14,13 @@ by Claude Code after ~30 days; run the archiver if you want history to keep.
 
 Usage: python extract_transcript_text.py <project_dir> <out_dir>
        python extract_transcript_text.py --project <slug> [--out DIR] [--source DIR] [--state FILE]
-       python extract_transcript_text.py --all [--out DIR] [--source DIR] [--state FILE]
 """
 import argparse
 import json
 import os
 import re
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -59,7 +59,7 @@ def iter_messages(path: Path):
                 continue
             rtype = rec.get("type")
             if rtype == "summary" and rec.get("summary"):
-                yield ("SESSION SUMMARY", rec["summary"], None)
+                yield ("SESSION SUMMARY (context-only, not evidence)", rec["summary"], None)
                 continue
             if rec.get("isSidechain"):
                 continue
@@ -125,14 +125,26 @@ def extract(project_dir: Path, out_dir: Path, state_path: Path = DEFAULT_STATE, 
             size += len(entry)
         flush()
         files[key] = {"messages": len(messages), "next_part": part_no}
-        # persist state per transcript, not once at the end — a crash mid-run must
-        # not leave emitted parts unrecorded (the next run would re-emit them)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Parts precede state deliberately: a crash re-emits duplicates (which
+        # judges/dedup catch) rather than losing content.
+        atomic_write_state(state_path, state)
         print(f"{session}: {len(messages)-done} new message(s), {written/1e3:.0f} KB")
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_state(state_path, state)
     return created
+
+def atomic_write_state(state_path: Path, state: dict) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=state_path.name + ".", suffix=".tmp", dir=state_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(json.dumps(state, indent=2, sort_keys=True) + "\n")
+        os.replace(name, state_path)
+    except BaseException:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+        raise
 
 def source_root() -> Path:
     archive = os.environ.get("REMEMBRANCER_ARCHIVE")
