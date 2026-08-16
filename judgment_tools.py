@@ -16,8 +16,7 @@ import math
 import sys
 from collections import Counter
 from pathlib import Path
-
-RULINGS = {"NEW", "DUPLICATE", "SUPERSEDED", "DISCARD", "CONFLICT"}
+from promote import RULINGS  # single definition; promote.py is the contract's gate
 
 
 def split(queue: Path, chunks_dir: Path, size: int) -> None:
@@ -72,7 +71,8 @@ def merge(judgments_dir: Path, queue: Path, out: Path, review: Path | None) -> i
         lines = []
         for o in merged:
             if o["ruling"] in ("NEW", "CONFLICT"):
-                lines += [f"## {o['atom']} — {o['ruling']} (vs {o.get('memory_file')})",
+                versus = f" (vs {o['memory_file']})" if o.get("memory_file") else ""
+                lines += [f"## {o['atom']} — {o['ruling']}{versus}",
                           f"note: {o.get('note', '')}",
                           f"atom_quote: {str(o.get('atom_quote', ''))[:200]}",
                           f"memory_quote: {str(o.get('memory_quote', ''))[:200]}", ""]

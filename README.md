@@ -82,12 +82,16 @@ python promote.py staging/<project> <memory-dir> --apply \
 ```
 
 `--apply` requires the queue: the dry run writes a `<queue>.manifest.json`
-sidecar hashing every staged atom and every corpus file, and apply refuses
-if ANY content changed since judging — an edited atom, a modified or deleted
-memory file, a sync clobber. Judgments are bound to exactly what was judged;
-timestamps are never the authority. Set `REMEMBRANCER_GLOBAL_MD` to your
-global instructions file (e.g. CLAUDE.md) so the manifest covers it too —
-the judgment contract has judges read it.
+sidecar hashing every staged atom and every corpus file (the derived
+`MEMORY.md` index is excluded — apply rewrites it), and apply refuses if ANY
+content changed since judging — an edited atom, a modified or deleted memory
+file, a sync clobber. Apply's own writes never invalidate the manifest, so a
+crashed or repeated apply re-runs with the SAME queue — and a manifest
+regenerated after judging is itself refused, since it can only vouch for the
+current corpus, not the one the judges read. Judgments are bound to exactly
+what was judged; timestamps are never the sole authority. Set
+`REMEMBRANCER_GLOBAL_MD` to your global instructions file (e.g. CLAUDE.md)
+so the manifest covers it too — the judgment contract has judges read it.
 
 Keep reports OUT of the staging directory — every `.md` under staging is
 treated as a staged atom.
