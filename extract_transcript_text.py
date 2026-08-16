@@ -4,7 +4,7 @@ Keeps: real user messages, assistant text (truncated), compaction summaries.
 Drops: tool calls/results, sidechains (subagent chatter), hooks, queue ops,
        system-reminder blocks embedded in user content.
 
-Output: one .txt extract per session, split into ~MAX_PART_BYTES parts at
+Output: one .txt extract per session, split into ~MAX_PART_CHARS parts at
 message boundaries so each part fits comfortably in a distiller context.
 
 Source resolution: the REMEMBRANCER_ARCHIVE environment variable (a durable
@@ -26,7 +26,7 @@ from pathlib import Path
 
 ASSISTANT_TRUNC = 400      # chars kept per assistant text block
 USER_CAP = 4000            # chars kept per user message (huge pastes trimmed)
-MAX_PART_BYTES = 140_000   # split threshold per output part
+MAX_PART_CHARS = 140_000   # split threshold per part (chars; ≈ bytes for mostly-ASCII dialogue)
 
 SYS_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
@@ -112,13 +112,13 @@ def extract(project_dir: Path, out_dir: Path, state_path: Path = DEFAULT_STATE, 
             body = f"=== session {session} — part {part_no} ===\n\n" + "\n\n".join(part)
             (out_dir / name).write_text(body, encoding="utf-8")
             created.append(out_dir / name)
-            written += len(body)
+            written += len(body.encode("utf-8"))
             part, part_no = [], part_no + 1
 
         size = 0
         for role, text, ts in messages[done:]:
             entry = f"[{ts or '-'}] {role}:\n{text}"
-            if size + len(entry) > MAX_PART_BYTES and part:
+            if size + len(entry) > MAX_PART_CHARS and part:
                 flush()
                 size = 0
             part.append(entry)
@@ -160,9 +160,22 @@ def main(argv=None):
     group.add_argument("--project"); group.add_argument("--all", action="store_true")
     parser.add_argument("--source", type=Path); parser.add_argument("--out", type=Path, default=Path(__file__).parent / "extracts")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE); args = parser.parse_args(argv)
-    root = args.source or source_root(); projects = [root / args.project] if args.project else sorted(p for p in root.iterdir() if p.is_dir())
+    root = args.source or source_root()
+    if not root.is_dir():
+        parser.error(f"source root does not exist: {root}")
+    # Name the root so the archive->live fallback in source_root() is visible: extracting
+    # from the 30-day live dir when REMEMBRANCER_ARCHIVE is unset or missing must not
+    # look like success over the full archive.
+    print(f"source root: {root}")
+    if args.project:
+        project = root / args.project
+        if not project.is_dir():
+            parser.error(f"project directory does not exist: {project}")
+        projects = [project]
+    else:
+        projects = sorted(p for p in root.iterdir() if p.is_dir())
     for project in projects:
-        if project.is_dir(): extract(project, args.out / project.name, args.state)
+        extract(project, args.out / project.name, args.state)
 
 
 if __name__ == "__main__":

@@ -24,15 +24,19 @@ def norm(s: str) -> str:
 
 
 def build_corpus(extracts_dir: Path) -> str:
-    entries = []
+    # Parse line-wise, tracking which entry each line belongs to. Splitting on blank
+    # lines instead would re-admit every paragraph of a multi-paragraph summary after
+    # its first — summaries are model recollection and must never become evidence.
+    kept = []
     for path in extracts_dir.rglob("*.txt"):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for entry in re.split(r"\n\s*\n", text):
-            first = entry.splitlines()[0] if entry.splitlines() else ""
-            if re.match(r"^\[[^\]]+\]\s+.*SESSION SUMMARY.*:", first):
-                continue
-            entries.append(entry)
-    return norm(html.unescape(" ".join(entries)))
+        in_summary = False  # reset per file: parts are split at entry boundaries
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            header = re.match(r"^\[[^\]]*\]\s+(.*):\s*$", line)
+            if header:
+                in_summary = "SESSION SUMMARY" in header.group(1)
+            if not in_summary:
+                kept.append(line)
+    return norm(html.unescape(" ".join(kept)))
 
 
 def evidence_ok(atom_text: str, corpus: str) -> bool:

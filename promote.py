@@ -11,7 +11,7 @@ FIELDS = {"atom", "ruling", "memory_file", "atom_quote", "memory_quote", "note"}
 
 @dataclass
 class Atom:
-    path: Path; name: str; description: str; kind: str; session: str; ts: str; body: str; text: str
+    path: Path; name: str; description: str; kind: str; session: str; body: str; text: str
 
 def field(text, key):
     m = re.search(rf"(?m)^\s*{re.escape(key)}:\s*[\"']?(.*?)[\"']?\s*$", text)
@@ -20,7 +20,7 @@ def field(text, key):
 def load(path):
     text = path.read_text(encoding="utf-8"); parts = text.split("---", 2)
     body = parts[2].strip() if len(parts) > 2 else text
-    return Atom(path, field(text, "name") or path.stem, field(text, "description"), field(text, "type"), field(text, "source_session") or field(text, "originSessionId"), field(text, "source_ts"), body, text)
+    return Atom(path, field(text, "name") or path.stem, field(text, "description"), field(text, "type"), field(text, "source_session") or field(text, "originSessionId"), body, text)
 
 def house(atom):
     return f"---\nname: {atom.name}\ndescription: \"{atom.description.replace(chr(34), chr(39))}\"\nmetadata:\n  node_type: memory\n  type: {atom.kind}\n  originSessionId: {atom.session}\n---\n\n{atom.body}\n"
@@ -75,7 +75,12 @@ def read_judgments(path, atoms, evidence, target, corpus_also):
             raise ValueError(f"atom_quote does not appear in staged atom: {slug}")
         if value["ruling"] in ("DUPLICATE", "SUPERSEDED"):
             candidates = list(target.glob("*.md")) + list(corpus_also)
-            cited = next((p for p in candidates if p.name == value["memory_file"] or str(p) == value["memory_file"]), None)
+            matches = [p for p in candidates if p.name == value["memory_file"] or str(p) == value["memory_file"]]
+            # a corpus-also file can share a bare name with a project memory file; a bare
+            # citation must not silently resolve to whichever comes first — cite the full path
+            if len({p.resolve() for p in matches}) > 1:
+                raise ValueError(f"ambiguous memory_file for {slug}: {value['memory_file']} names more than one corpus file; cite the full path")
+            cited = matches[0] if matches else None
             if cited is None or not cited.exists():
                 raise ValueError(f"memory_file does not exist for {slug}: {value['memory_file']}")
             if norm(value["memory_quote"]) not in norm(cited.read_text(encoding="utf-8")):
@@ -87,6 +92,9 @@ def read_judgments(path, atoms, evidence, target, corpus_also):
 
 def stamp(mtime):
     return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+def md_cell(s):
+    return s.replace("|", "\\|")
 
 def judged_at(judgments):
     """When the rulings were formed. Prefer the EARLIEST per-chunk judge output: a chunked
@@ -118,6 +126,9 @@ def sha256_text(path):
     return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
 def resolved_corpus_also(corpus_also):
+    # None means "resolve from REMEMBRANCER_GLOBAL_MD"; [] means "no corpus-also
+    # files". Tests must pass [] so a developer's environment variable never leaks
+    # its file into queue manifests.
     if corpus_also is not None:
         return list(corpus_also)
     # Judges are told to read your global instructions file (e.g. CLAUDE.md)
@@ -127,7 +138,10 @@ def resolved_corpus_also(corpus_also):
     return [Path(env).expanduser()] if env else []
 
 def corpus_files(target, corpus_also):
-    files = list(sorted(target.glob("*.md")))
+    # MEMORY.md is excluded for the same reason moved_corpus skips it: apply rewrites
+    # the index on every run, and it is derived from the atoms, not a source of facts.
+    # Including it would invalidate every judging-time manifest after the first apply.
+    files = [path for path in sorted(target.glob("*.md")) if path.name != "MEMORY.md"]
     for path in corpus_also:
         if path.exists():
             files.append(path)
@@ -165,9 +179,31 @@ def validate_manifest(queue, atoms, target, corpus_also):
     current_files = corpus_files(target, corpus_also)
     current = {path.name: sha256_text(path) for path in current_files}
     recorded = data.get("corpus_manifest", {})
-    changed_files = sorted(name for name in set(current) | set(recorded) if current.get(name) != recorded.get(name))
+    changed_files = []
+    for name in sorted(set(current) | set(recorded)):
+        if current.get(name) == recorded.get(name):
+            continue
+        # Our own prior apply output is not judging-basis drift — same rule as
+        # moved_corpus: the file is new since the manifest AND byte-identical to what
+        # we would write now. Deletions, foreign edits, and edited-then-restored
+        # slugs (recorded under a different hash) still refuse.
+        atom = atoms.get(Path(name).stem)
+        if atom is not None and name not in recorded:
+            path = target / name
+            if path.exists() and path.read_text(encoding="utf-8") == house(atom):
+                continue
+        changed_files.append(name)
     if changed_files:
-        raise ValueError(f"memory corpus changed since judging: {', '.join(changed_files)}")
+        raise ValueError(f"memory corpus changed since judging: {', '.join(changed_files)}; re-run dry-run + judgment against the current corpus")
+    return data
+
+def manifest_created(data):
+    """Epoch seconds of the manifest's creation. The manifest must predate the rulings:
+    one regenerated after judging vouches for the current corpus, not the judged one."""
+    try:
+        return datetime.fromisoformat(data["created"]).timestamp()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"queue manifest has no valid 'created' timestamp; re-run the dry-run: {exc}") from exc
 
 def run(staging, target, apply=False, extracts=None, report=None, judgments=None, queue=None, corpus_also=None):
     if extracts is None: raise ValueError("--extracts is required; provide a directory containing transcript extract .txt files")
@@ -181,22 +217,39 @@ def run(staging, target, apply=False, extracts=None, report=None, judgments=None
     if apply:
         if judgments is None: raise ValueError("--apply requires --judgments from the external judgment stage; there is no bypass")
         if queue is None: raise ValueError("--apply requires --queue so judged content can be verified")
-        validate_manifest(queue, atoms, target, corpus_also)
+        manifest = validate_manifest(queue, atoms, target, corpus_also)
         ruled = read_judgments(judgments, atoms, evidence, target, corpus_also)
         cutoff, moved = moved_corpus(target, atoms, judgments, corpus_also)
+        created = manifest_created(manifest)
+        if created > cutoff:
+            raise ValueError(
+                f"queue manifest postdates the judgments: manifest created {stamp(created)}, judged at {stamp(cutoff)}\n"
+                "A manifest regenerated after judging vouches for the current corpus, not the one\n"
+                "the judges read. Apply with the queue the judgments were produced from, or\n"
+                "re-judge against the current queue.")
         if moved:
             detail = "\n".join(f"  {path.name}  {stamp(path.stat().st_mtime)}" for path in moved)
             raise ValueError(
                 f"judgments are stale: {len(moved)} corpus file(s) changed after judging ({stamp(cutoff)})\n{detail}\n"
                 "Rulings are only valid against the corpus as of judging time. Re-judge this\n"
                 "project against the current corpus, then apply the new judgments.")
-        rows = [(atom, ruled[slug]["ruling"], evidence[slug], ruled[slug]["note"], "write" if ruled[slug]["ruling"] == "NEW" else "review") for slug, atom in atoms.items()]
+        rows = [(atom, ruled[slug]["ruling"], evidence[slug], ruled[slug]["note"]) for slug, atom in atoms.items()]
         applied = []
         try:
-            for atom, ruling, _, _, _ in rows:
-                if ruling == "NEW" and not (target / f"{atom.name}.md").exists():
-                    (target / f"{atom.name}.md").write_text(house(atom), encoding="utf-8")
-                    append_index(target / "MEMORY.md", atom)
+            for atom, ruling, _, _ in rows:
+                if ruling != "NEW":
+                    continue
+                dest, index = target / f"{atom.name}.md", target / "MEMORY.md"
+                if not dest.exists():
+                    dest.write_text(house(atom), encoding="utf-8")
+                    append_index(index, atom)
+                    applied.append(atom.name)
+                # File present and byte-identical to our own output: a prior apply crashed
+                # between the two writes iff its index line is missing — finish the pair.
+                # A foreign same-slug file (text differs) is left alone, as before.
+                elif dest.read_text(encoding="utf-8") == house(atom) and (
+                        not index.exists() or index_line(atom) not in index.read_text(encoding="utf-8")):
+                    append_index(index, atom)
                     applied.append(atom.name)
         except Exception as exc:
             failed = atom.name
@@ -211,7 +264,11 @@ def run(staging, target, apply=False, extracts=None, report=None, judgments=None
             else:
                 print(text, end="")
             raise ValueError(f"partial apply failed; applied: {', '.join(applied) or 'none'}; failed: {failed}; remaining: {', '.join(remaining) or 'none'}") from exc
-        text = "# Judgment apply report\n\n| Atom | Ruling | Evidence | Judge note | Action |\n|---|---|---|---|---|\n" + "".join(f"| {a.name} | {r} | {'verified' if v else 'unverified'} | {n} | {x} |\n" for a, r, v, n, x in rows)
+        # Action reflects what actually happened: "write" only for atoms whose file+index
+        # pair this run completed; a NEW atom skipped because it already exists must not
+        # report as written.
+        rows = [(a, r, v, n, ("write" if a.name in applied else "already present") if r == "NEW" else "review") for a, r, v, n in rows]
+        text = "# Judgment apply report\n\n| Atom | Ruling | Evidence | Judge note | Action |\n|---|---|---|---|---|\n" + "".join(f"| {a.name} | {r} | {'verified' if v else 'unverified'} | {md_cell(n)} | {x} |\n" for a, r, v, n, x in rows)
         discarded = [a.name for a, ruling, *_ in rows if ruling == "DISCARD"]
         text += "\n## Discarded\n\n" + ("\n".join(f"- {slug}" for slug in discarded) if discarded else "None") + "\n"
     else:
@@ -227,10 +284,23 @@ def run(staging, target, apply=False, extracts=None, report=None, judgments=None
     return rows
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(); parser.add_argument("staging_dir", type=Path); parser.add_argument("target_memory_dir", type=Path); parser.add_argument("--apply", action="store_true"); parser.add_argument("--judgments", type=Path); parser.add_argument("--extracts", type=Path, required=True, help="directory containing transcript extract .txt files"); parser.add_argument("--report", type=Path); parser.add_argument("--queue", type=Path); parser.add_argument("--corpus-also", type=Path, action="append", help="additional file the judges were required to read (e.g. the global standing-rules CLAUDE.md); repeatable"); args = parser.parse_args(argv)
-    if args.apply and args.judgments is None: parser.error("--apply requires --judgments from the external judgment stage; there is no bypass")
-    if args.apply and args.queue is None: parser.error("--apply requires --queue so judged content can be verified")
-    try: run(args.staging_dir, args.target_memory_dir, args.apply, args.extracts, args.report, args.judgments, args.queue, args.corpus_also)
-    except ValueError as exc: parser.error(str(exc))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("staging_dir", type=Path)
+    parser.add_argument("target_memory_dir", type=Path)
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--judgments", type=Path)
+    parser.add_argument("--extracts", type=Path, required=True, help="directory containing transcript extract .txt files")
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--queue", type=Path)
+    parser.add_argument("--corpus-also", type=Path, action="append", help="additional file the judges were required to read (e.g. the global standing-rules CLAUDE.md); repeatable")
+    args = parser.parse_args(argv)
+    if args.apply and args.judgments is None:
+        parser.error("--apply requires --judgments from the external judgment stage; there is no bypass")
+    if args.apply and args.queue is None:
+        parser.error("--apply requires --queue so judged content can be verified")
+    try:
+        run(args.staging_dir, args.target_memory_dir, args.apply, args.extracts, args.report, args.judgments, args.queue, args.corpus_also)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 if __name__ == "__main__": main()
