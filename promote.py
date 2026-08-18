@@ -25,13 +25,13 @@ def load(path):
 def house(atom):
     return f"---\nname: {atom.name}\ndescription: \"{atom.description.replace(chr(34), chr(39))}\"\nmetadata:\n  node_type: memory\n  type: {atom.kind}\n  originSessionId: {atom.session}\n---\n\n{atom.body}\n"
 
-INDEX_LINE_MAX = 140  # the index loads into context every session — keep hooks bounded
+INDEX_HOOK_MAX = 100  # cap the HOOK, not the line: prefix length is slug overhead, not verbosity
 
 def index_line(atom):
     title = atom.name.replace("-", " ")
     title = title[:1].upper() + title[1:]
     prefix = f"- [{title}]({atom.name}.md) — "
-    budget = max(0, INDEX_LINE_MAX - len(prefix))
+    budget = INDEX_HOOK_MAX
     desc = " ".join(atom.description.split())
     if len(desc) <= budget:
         return prefix + desc

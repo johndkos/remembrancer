@@ -119,12 +119,12 @@ def test_apply_with_judgments_writes_only_new_and_indexes_once(tmp_path):
     assert (target / "rolling-window.md").read_text().count("Same rolling fact") == 1
 
 def test_index_hook_never_truncates_mid_word(tmp_path):
-    from promote import INDEX_LINE_MAX, index_line, load
+    from promote import INDEX_HOOK_MAX, index_line, load
     long_desc = "CDGA differential CSVs and their JSON twins carry exact byte conventions " * 6
     path = tmp_path / "long.md"
     atom(path, "verbose-atom", long_desc, "Body")
     line = index_line(load(path))
-    assert len(line) <= INDEX_LINE_MAX + 1                  # +1 for the ellipsis
+    assert len(line.split(" — ", 1)[1]) <= INDEX_HOOK_MAX + 1   # +1 for the ellipsis
     assert line.endswith("…"), "a shortened hook must be marked as elided"
     assert not line.rstrip("…").endswith(" "), "no dangling space before the ellipsis"
     assert line.rstrip("…").split()[-1] in long_desc.split(), "last word must be whole"
