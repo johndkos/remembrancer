@@ -25,7 +25,7 @@ def load(path):
 def house(atom):
     return f"---\nname: {atom.name}\ndescription: \"{atom.description.replace(chr(34), chr(39))}\"\nmetadata:\n  node_type: memory\n  type: {atom.kind}\n  originSessionId: {atom.session}\n---\n\n{atom.body}\n"
 
-INDEX_LINE_MAX = 320  # the index loads into context every session — keep hooks bounded
+INDEX_LINE_MAX = 140  # the index loads into context every session — keep hooks bounded
 
 def index_line(atom):
     title = atom.name.replace("-", " ")
